@@ -109,3 +109,26 @@ This ledger tracks the long-running convergence of the SlateboxJS v3 library and
 ## Iteration rule
 
 Choose one high-risk unproven vertical slice. Reproduce it in the canonical app, fix it at the correct library/facade/app boundary, verify every applicable invariant leg, add regression coverage, run proportional gates, commit each repository independently, and update this ledger with current evidence.
+
+## 2026-09-21/22 — slateboxjs 3.1.2 publication, test deployment, and the external-suite incident
+
+Publication and deployment (all green):
+
+- `slateboxjs@3.1.2` published to npm (built from `release/3.1.2-candidate`, commit `e7ffd5948317ed201c217cb282f285a16cb68133`, version 3.1.2). Published integrity `sha512-l1S/19dQpEUc1nFF+1oQ17haCitOceAaovu75EVrsULDaimwN3sazW2E1UJuVaK54u1BhNOk3k2wxKhDud9u0Q==`; SHA-256 `6fbdf5d6a17d458d592b95216453fb4b0f26fa2422e9151811858af1cefdc374`. Tag `v3.1.2` pushed. Library PR #10 merged to main.
+- App PR #64 (exact 3.1.2 pin + registry lock) and PR #65 (lockfile sync for `npm ci` parity) merged to `test`.
+- Test deploys via GitHub Actions both succeeded — run 35680308218 (#64) and run 35681054751 (#65), ~8–9 min each, including image push and kubectl rollout. The workflow kubeconfig repaired in July now works end to end. Live deployment `slatebox-test` reached obsGen 71/71, 1/1 ready, `/readyz` 200 with DB ping. Served image `timheckel/slatebox-test:1.3.21-a784df50eb9b` (test tip `a784df50eb9b` = c94c00d + 3.1.2 + lock sync).
+- The 5.3 MB live client bundle was fetched and grepped: contains the September rotate/selection guard marker (`Drag-tail click`) and y-websocket/Yjs dynamic-import manifest entries — slateboxjs 3.1.2 confirmed in the running code, served from the test cluster.
+
+Verification evidence:
+
+- Control gate: `npm run test:port-container` in registry mode (published 3.1.2, integrity-pinned, `linux/amd64`) passed on 2026-09-22, including the full external app suite (`app-collab-surfaces` 16 A→B surfaces + `app-port-invariants`) run over the network against the disposable packed stack — `2 passed (24.5s)`. Identical app code + identical library on packed = green.
+- PR #65 candidate CI (run 35680711606, lock-synced): success, 7m54s.
+- Live-host probes (2026-09-22): real-browser DDP frames show healthy transport (connected, per-call replies ~45 ms; relay `wss://collab.slatebox.com` answers 101 upgrade). A canary node created on client A propagated to an isolated client B within 60 s on a live slate without page reload — cross-client collaboration works on the deployed app.
+
+External-suite incident (open; failing on the live host only):
+
+- `SLATEBOX_APP_EXTERNAL=true SLATEBOX_APP_URL=https://test.slatebox.com npm run test:app` failed both specs on 2026-09-22, while the byte-identical packed control passed minutes apart.
+- Root cause (fully traced with frame-level evidence): Meteor serializes method calls per DDP connection. The current guest onboarding flow (AI-operations platform, deployed to test with c94c00d on 2026-07-19; DeepInfra wiring added 2026-07-16) issues live AI calls — `openai.welcome` measured ~22 s, followed by cascading 17–25 s windows. During the first ~60–90 s of a fresh-slate session, the canvas data path, subscriptions, and the collab provider init (which must await `onInitCollaboration` → the `collaborators.init` method) queue behind the AI chain and miss the harness's 30 s sync windows / 180 s budgets. Observed: `collaborators.init` sent at t+4.4 s answered at t+64.6 s, blocked behind the AI chain, then completed in ~45 ms.
+- Calibration fact: every historical green run of this suite (local harness, packed gates, the 2026-07-14 external run at revision 40) ran WITHOUT a live AI provider — dev/test settings files contain no DeepInfra entry, and the packed gate uses `settings.dev.json`. The live test cluster is the only configuration with live AI, via the `TEST_METEOR_SETTINGS` secret + `TEST_DEEPINFRA_API_KEY`, and the external suite has not been run against the test cluster between the 2026-07-19 AI-platform deploy and 2026-09-22. This is a first-verification failure of a 64-day-old configuration/behavior change, not a regression introduced by slateboxjs 3.1.2 or by PRs #64/#65.
+- Options on the table (owner decision pending): (a) restore the test cluster to the gate-calibrated no-live-AI configuration (requires reconstructing the unrecoverable `TEST_METEOR_SETTINGS` secret — destructive-risk surgery to test infra); (b) re-time/restructure the external harness around the AI-on product flow (slow, latency-flaky, and AI inserts arbitrary nodes mid-test that break spec assumptions); (c) product fix: move the onboarding AI chain off the shared per-connection method queue (correct long-term, owned by the AI-platform). The suite stays RED against test.slatebox.com until one is chosen; no version bump or gate relaxation was used to paper over it.
+- Production remains untouched and user-reserved. The 3.1.2 deployment goal state is met at library, transport, and rollout level; the open item is the harness-vs-live-AI calibration above.
